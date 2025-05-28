@@ -1,0 +1,32 @@
+This is the problem:
+
+Sergey AI modelPre-read: Predicting User Value Based on Early Behavioral Signals (DOI + 72h)
+Context: We're building a model to predict user value (in USD) within 30 days, based on behavior in the first 72 hours post-DOI (double opt-in). Business need: optimize affiliate payouts and reduce overpayment on low-value traffic.
+Challenge Overview:
+* ~94% of users don’t convert (zero revenue)
+* Among converters (~6%), 50% make just 1 order
+* Revenue distribution is fat-tailed (a few high-value users drive most revenue)
+* Existing model predicts continuous values (e.g., $0.37), but packages are discrete ($39.99, $59.99)
+Current Model Approach (v2):
+* Tracks user behaviour for 48h post-DOI
+* Includes hourly cumulative spend features
+* Uses adjusted regression with smart post-processing:
+    * Predicted values < $0.50 mapped to $0 (non-converters)
+    * Remaining mapped to decile-based buckets aligned with actual outcomes
+Business Insight:
+* Model is pessimistic but directionally strong
+* 85% of model-driven decisions to reduce payout would be correct
+
+Next Step (v3): Extend to 72 Hours
+* 99% of paying users convert within 5 days
+* Including 72h should catch more late converters and reduce false negatives
+
+Discussion Questions:
+1. Should we switch from USD prediction to value bucket classification?Maybe anomaly analysis and then whale prediction?
+2. Do we want to compress features further or explore hourly data clusteringcompress for what ? Is there a features analysis ?
+3. Do we want to forecast conversion (yes/no) first, and then value?Anomaly + whale regression
+4. Any constraints in downstream usage that affect how granular we can go?What? In terms of data shape?
+Goal: Align on the best way to represent early user behavior for value prediction.
+
+
+Firstly lets analyze the 
