@@ -207,35 +207,61 @@ def objective(trial, X_train, y_train, X_val, y_val):
 
     objective_func = trial.suggest_categorical("objective", objective_choices)
 
-    # M2 Mac optimized parameters
+    # SOLUTION 1: Add regularization to prevent overfitting to dominant features
+    # SOLUTION 2: Increase model complexity for smoother predictions
+    # SOLUTION 3: Add feature sampling to reduce dominance
+
+    # M2 Mac optimized parameters with anti-clustering improvements
     params = {
         "objective": objective_func,
         "booster": trial.suggest_categorical(
             "booster", ["gbtree"]
         ),  # Focus on gbtree for speed
+        # SOLUTION 1: Stronger regularization to prevent hard splits
         "lambda": trial.suggest_float(
-            "lambda", 1e-8, 10.0, log=True
-        ),  # Increased range
-        "alpha": trial.suggest_float("alpha", 1e-8, 10.0, log=True),  # Increased range
+            "lambda", 1e-3, 50.0, log=True
+        ),  # Increased L2 regularization
+        "alpha": trial.suggest_float(
+            "alpha", 1e-3, 50.0, log=True
+        ),  # Increased L1 regularization
+        # SOLUTION 2: Feature sampling to reduce dominant feature impact
         "subsample": trial.suggest_float(
-            "subsample", 0.7, 1.0
-        ),  # Narrowed range for speed
+            "subsample", 0.6, 0.9
+        ),  # More aggressive subsampling
         "colsample_bytree": trial.suggest_float(
-            "colsample_bytree", 0.7, 1.0
-        ),  # Narrowed range for speed
-        "max_depth": trial.suggest_int("max_depth", 4, 10),  # Reduced range for speed
+            "colsample_bytree", 0.5, 0.8
+        ),  # Stronger feature sampling
+        "colsample_bylevel": trial.suggest_float(
+            "colsample_bylevel", 0.5, 0.9
+        ),  # Per-level feature sampling
+        "colsample_bynode": trial.suggest_float(
+            "colsample_bynode", 0.5, 0.9
+        ),  # Per-node feature sampling
+        # SOLUTION 3: Model complexity for smoother predictions
+        "max_depth": trial.suggest_int(
+            "max_depth", 3, 8
+        ),  # Shallower trees for smoother predictions
         "min_child_weight": trial.suggest_int(
-            "min_child_weight", 1, 15
-        ),  # Reduced range
+            "min_child_weight", 5, 50
+        ),  # Higher minimum samples per leaf
+        "max_delta_step": trial.suggest_float(
+            "max_delta_step", 0, 10
+        ),  # Limit step size for stability
+        # SOLUTION 4: Learning rate and tree count for ensemble smoothing
         "eta": trial.suggest_float(
-            "eta", 0.05, 0.3, log=True
-        ),  # Slightly higher minimum for faster convergence
+            "eta", 0.01, 0.2, log=True
+        ),  # Lower learning rate for smoother learning
+        "gamma": trial.suggest_float(
+            "gamma", 0, 20
+        ),  # Minimum loss reduction for splits
         "random_state": RANDOM_SEED,
         "n_jobs": N_CORES,  # Use all available cores
-        "early_stopping_rounds": 30,  # Reduced for faster trials
+        "early_stopping_rounds": 50,  # Increased for better convergence
         # M2 Mac optimizations
         "tree_method": "gpu_hist" if GPU_AVAILABLE else "hist",  # Use GPU if available
         "max_bin": 256,  # Optimized for M2 memory bandwidth
+        # SOLUTION 5: Interaction constraints to prevent over-reliance on single features
+        "interaction_constraints": "[[0,1,2,3,4],[5,6,7,8,9],[10,11,12,13,14]]",  # Force feature interactions
     }
 
     # GPU-specific optimizations
@@ -269,8 +295,10 @@ def objective(trial, X_train, y_train, X_val, y_val):
     # Add eval_metric to params
     params["eval_metric"] = eval_metric
 
-    # Reduced n_estimators for faster trials, early stopping will handle convergence
-    model = xgb.XGBRegressor(n_estimators=1000, **params)  # Reduced from 2000
+    # SOLUTION 6: More trees with lower learning rate for ensemble smoothing
+    model = xgb.XGBRegressor(
+        n_estimators=2000, **params
+    )  # Increased back to 2000 for smoothing
 
     # Handle potential issues for different objectives
     if objective_func == "reg:squaredlogerror":
@@ -325,7 +353,7 @@ def objective(trial, X_train, y_train, X_val, y_val):
         if hasattr(model, "n_estimators_"):  # This is set after fit
             trial.set_user_attr("best_n_estimators", model.n_estimators_)
         else:  # Fallback if somehow n_estimators_ is not available
-            trial.set_user_attr("best_n_estimators", 1000)  # The initial n_estimators
+            trial.set_user_attr("best_n_estimators", 2000)  # The initial n_estimators
 
     print(
         f"Trial {trial.number} - RMSE: {rmse:.6f}, MAE: {mae:.6f}, Objective: {objective_func}"
@@ -387,6 +415,333 @@ def analyze_target_distribution(y, dataset_name):
     }
 
 
+def inverse_transform_revenue(y_scaled):
+    """Convert log-scaled revenue back to true dollar values."""
+    return np.expm1(y_scaled)  # Inverse of np.log1p
+
+
+def calculate_business_metrics(y_true_dollars, y_pred_dollars):
+    """Calculate business-relevant metrics using true dollar values."""
+    # Remove any negative predictions (shouldn't happen but safety check)
+    y_pred_dollars = np.maximum(y_pred_dollars, 0)
+
+    # Basic metrics in dollars
+    mae_dollars = mean_absolute_error(y_true_dollars, y_pred_dollars)
+    rmse_dollars = np.sqrt(mean_squared_error(y_true_dollars, y_pred_dollars))
+
+    # Median Absolute Error (more robust to outliers)
+    median_ae_dollars = np.median(np.abs(y_true_dollars - y_pred_dollars))
+
+    # Mean Absolute Percentage Error (MAPE) - handle division by zero
+    non_zero_mask = y_true_dollars > 0
+    if non_zero_mask.sum() > 0:
+        mape = (
+            np.mean(
+                np.abs(
+                    (y_true_dollars[non_zero_mask] - y_pred_dollars[non_zero_mask])
+                    / y_true_dollars[non_zero_mask]
+                )
+            )
+            * 100
+        )
+    else:
+        mape = np.inf
+
+    # Symmetric MAPE (handles zero values better)
+    smape = (
+        np.mean(
+            2
+            * np.abs(y_true_dollars - y_pred_dollars)
+            / (np.abs(y_true_dollars) + np.abs(y_pred_dollars) + 1e-8)
+        )
+        * 100
+    )
+
+    # Revenue bucket analysis
+    revenue_buckets = {
+        "Zero Revenue": (y_true_dollars == 0).sum(),
+        "Low Revenue ($0-$1)": ((y_true_dollars > 0) & (y_true_dollars <= 1)).sum(),
+        "Medium Revenue ($1-$10)": (
+            (y_true_dollars > 1) & (y_true_dollars <= 10)
+        ).sum(),
+        "High Revenue ($10-$100)": (
+            (y_true_dollars > 10) & (y_true_dollars <= 100)
+        ).sum(),
+        "Very High Revenue ($100+)": (y_true_dollars > 100).sum(),
+    }
+
+    # Prediction accuracy by bucket
+    bucket_accuracy = {}
+    for bucket_name, count in revenue_buckets.items():
+        if count > 0:
+            if bucket_name == "Zero Revenue":
+                mask = y_true_dollars == 0
+            elif bucket_name == "Low Revenue ($0-$1)":
+                mask = (y_true_dollars > 0) & (y_true_dollars <= 1)
+            elif bucket_name == "Medium Revenue ($1-$10)":
+                mask = (y_true_dollars > 1) & (y_true_dollars <= 10)
+            elif bucket_name == "High Revenue ($10-$100)":
+                mask = (y_true_dollars > 10) & (y_true_dollars <= 100)
+            else:  # Very High Revenue
+                mask = y_true_dollars > 100
+
+            bucket_mae = mean_absolute_error(y_true_dollars[mask], y_pred_dollars[mask])
+            bucket_accuracy[bucket_name] = {
+                "count": count,
+                "mae_dollars": bucket_mae,
+                "mean_true": y_true_dollars[mask].mean(),
+                "mean_pred": y_pred_dollars[mask].mean(),
+            }
+
+    return {
+        "mae_dollars": mae_dollars,
+        "rmse_dollars": rmse_dollars,
+        "median_ae_dollars": median_ae_dollars,
+        "mape": mape,
+        "smape": smape,
+        "revenue_buckets": revenue_buckets,
+        "bucket_accuracy": bucket_accuracy,
+    }
+
+
+def create_business_plots(y_true_dollars, y_pred_dollars, dataset_name):
+    """Create business-focused plots with true dollar values."""
+
+    # 1. Actual vs Predicted in True Dollars
+    fig_dollars = go.Figure()
+    fig_dollars.add_trace(
+        go.Scatter(
+            x=y_true_dollars,
+            y=y_pred_dollars,
+            mode="markers",
+            name="Actual vs. Predicted ($)",
+            marker=dict(color="blue", opacity=0.6, size=4),
+            text=[
+                f"True: ${true:.2f}<br>Pred: ${pred:.2f}"
+                for true, pred in zip(y_true_dollars, y_pred_dollars)
+            ],
+            hovertemplate="%{text}<extra></extra>",
+        )
+    )
+    fig_dollars.add_trace(
+        go.Scatter(
+            x=[y_true_dollars.min(), y_true_dollars.max()],
+            y=[y_true_dollars.min(), y_true_dollars.max()],
+            mode="lines",
+            name="Perfect Prediction",
+            line=dict(color="red", dash="dash"),
+        )
+    )
+    fig_dollars.update_layout(
+        title=f"Revenue Prediction: True Dollar Values - {dataset_name}",
+        xaxis_title="Actual Revenue (USD)",
+        yaxis_title="Predicted Revenue (USD)",
+        xaxis_type="log",
+        yaxis_type="log",
+        width=800,
+        height=600,
+    )
+    fig_dollars.write_html(f"revenue_dollars_{dataset_name.replace(' ', '_')}.html")
+
+    # 2. Revenue Distribution Comparison
+    fig_dist = make_subplots(
+        rows=2,
+        cols=2,
+        subplot_titles=(
+            "Actual Revenue Distribution",
+            "Predicted Revenue Distribution",
+            "Revenue Buckets Comparison",
+            "Prediction Error by Revenue Level",
+        ),
+        specs=[
+            [{"secondary_y": False}, {"secondary_y": False}],
+            [{"secondary_y": False}, {"secondary_y": False}],
+        ],
+    )
+
+    # Actual revenue histogram
+    fig_dist.add_trace(
+        go.Histogram(x=y_true_dollars, nbinsx=50, name="Actual", opacity=0.7),
+        row=1,
+        col=1,
+    )
+
+    # Predicted revenue histogram
+    fig_dist.add_trace(
+        go.Histogram(x=y_pred_dollars, nbinsx=50, name="Predicted", opacity=0.7),
+        row=1,
+        col=2,
+    )
+
+    # Revenue buckets comparison
+    business_metrics = calculate_business_metrics(y_true_dollars, y_pred_dollars)
+    bucket_names = list(business_metrics["revenue_buckets"].keys())
+    bucket_counts = list(business_metrics["revenue_buckets"].values())
+
+    fig_dist.add_trace(
+        go.Bar(x=bucket_names, y=bucket_counts, name="Revenue Buckets"), row=2, col=1
+    )
+
+    # Prediction error by revenue level
+    revenue_ranges = np.logspace(-2, 2, 20)  # From $0.01 to $100
+    error_by_range = []
+    range_labels = []
+
+    for i in range(len(revenue_ranges) - 1):
+        mask = (y_true_dollars >= revenue_ranges[i]) & (
+            y_true_dollars < revenue_ranges[i + 1]
+        )
+        if mask.sum() > 5:  # Only include ranges with sufficient data
+            error = np.mean(np.abs(y_true_dollars[mask] - y_pred_dollars[mask]))
+            error_by_range.append(error)
+            range_labels.append(f"${revenue_ranges[i]:.2f}-${revenue_ranges[i+1]:.2f}")
+
+    if error_by_range:
+        fig_dist.add_trace(
+            go.Bar(x=range_labels, y=error_by_range, name="MAE by Range"), row=2, col=2
+        )
+
+    fig_dist.update_layout(
+        title=f"Revenue Analysis Dashboard - {dataset_name}",
+        height=800,
+        showlegend=True,
+    )
+    fig_dist.update_xaxes(title_text="Revenue ($)", row=1, col=1)
+    fig_dist.update_xaxes(title_text="Revenue ($)", row=1, col=2)
+    fig_dist.update_xaxes(title_text="Revenue Bucket", row=2, col=1)
+    fig_dist.update_xaxes(title_text="Revenue Range", row=2, col=2)
+    fig_dist.update_yaxes(title_text="Count", row=1, col=1)
+    fig_dist.update_yaxes(title_text="Count", row=1, col=2)
+    fig_dist.update_yaxes(title_text="Count", row=2, col=1)
+    fig_dist.update_yaxes(title_text="MAE ($)", row=2, col=2)
+
+    fig_dist.write_html(f"revenue_analysis_{dataset_name.replace(' ', '_')}.html")
+
+    # 3. Business Performance Summary
+    fig_summary = go.Figure()
+
+    # Create a summary table
+    summary_data = []
+    for bucket_name, bucket_info in business_metrics["bucket_accuracy"].items():
+        summary_data.append(
+            [
+                bucket_name,
+                bucket_info["count"],
+                f"${bucket_info['mean_true']:.2f}",
+                f"${bucket_info['mean_pred']:.2f}",
+                f"${bucket_info['mae_dollars']:.2f}",
+            ]
+        )
+
+    fig_summary.add_trace(
+        go.Table(
+            header=dict(
+                values=[
+                    "Revenue Bucket",
+                    "Count",
+                    "Avg Actual ($)",
+                    "Avg Predicted ($)",
+                    "MAE ($)",
+                ],
+                fill_color="lightblue",
+                align="left",
+            ),
+            cells=dict(
+                values=(
+                    list(zip(*summary_data)) if summary_data else [[], [], [], [], []]
+                ),
+                fill_color="white",
+                align="left",
+            ),
+        )
+    )
+
+    fig_summary.update_layout(
+        title=f"Business Performance Summary - {dataset_name}", height=400
+    )
+    fig_summary.write_html(f"business_summary_{dataset_name.replace(' ', '_')}.html")
+
+    return business_metrics
+
+
+def create_ensemble_model(X_train, y_train, X_val, y_val, best_params):
+    """Create an ensemble model to reduce clustering artifacts."""
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import Ridge
+    from sklearn.ensemble import VotingRegressor
+
+    print("🔄 Creating ensemble model to reduce prediction clustering...")
+
+    # XGBoost with best params (but more regularized)
+    xgb_params = best_params.copy()
+    xgb_params.update(
+        {
+            "lambda": max(xgb_params.get("lambda", 1), 10),  # Stronger L2
+            "alpha": max(xgb_params.get("alpha", 1), 5),  # Stronger L1
+            "max_depth": min(xgb_params.get("max_depth", 6), 5),  # Shallower
+            "colsample_bytree": 0.7,  # More feature sampling
+        }
+    )
+
+    if "objective" in xgb_params:
+        del xgb_params["objective"]
+
+    xgb_model = xgb.XGBRegressor(
+        objective="reg:squarederror",
+        n_estimators=1000,
+        random_state=RANDOM_SEED,
+        **xgb_params,
+    )
+
+    # Random Forest for smooth predictions
+    rf_model = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=8,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        max_features=0.7,
+        random_state=RANDOM_SEED,
+        n_jobs=N_CORES,
+    )
+
+    # Ridge regression for linear baseline
+    ridge_model = Ridge(alpha=1.0, random_state=RANDOM_SEED)
+
+    # Create ensemble
+    ensemble = VotingRegressor(
+        [("xgb", xgb_model), ("rf", rf_model), ("ridge", ridge_model)],
+        weights=[0.6, 0.3, 0.1],
+    )  # XGB gets most weight but not all
+
+    print("Training ensemble components...")
+    ensemble.fit(X_train, y_train)
+
+    return ensemble
+
+
+def add_feature_engineering(X):
+    """Add engineered features to reduce dominant feature impact."""
+    X_eng = X.copy()
+
+    # SOLUTION 7: Feature engineering to create smoother relationships
+    if "sum_revenue_0h_48h" in X_eng.columns:
+        # Log transform the dominant feature to reduce its impact
+        X_eng["log_sum_revenue_0h_48h"] = np.log1p(X_eng["sum_revenue_0h_48h"])
+
+        # Create binned version for smoother transitions
+        X_eng["sum_revenue_0h_48h_binned"] = pd.qcut(
+            X_eng["sum_revenue_0h_48h"], q=20, labels=False, duplicates="drop"
+        )
+
+        # Interaction features
+        if "sum_revenue_0h_24h" in X_eng.columns:
+            X_eng["revenue_ratio_24h_48h"] = X_eng["sum_revenue_24h_48h"] / (
+                X_eng["sum_revenue_0h_24h"] + 1e-6
+            )
+
+    return X_eng
+
+
 def train_and_evaluate(dataset_name, dataset_path):
     """Trains an XGBoost model using Optuna and evaluates it."""
     print(f"\n{'='*60}")
@@ -403,9 +758,22 @@ def train_and_evaluate(dataset_name, dataset_path):
     # Analyze target distribution
     target_stats = analyze_target_distribution(df[TARGET_COLUMN], dataset_name)
 
-    X_train, X_test, y_train, y_test = split_data(df, TARGET_COLUMN)
+    # SOLUTION 7: Apply feature engineering to reduce clustering
+    print(f"\n🔧 Applying feature engineering to reduce prediction clustering...")
+    X_original = df.drop(columns=[TARGET_COLUMN])
+    X_engineered = add_feature_engineering(X_original)
+    y = df[TARGET_COLUMN]
 
-    print(f"\nStarting Optuna hyperparameter optimization...")
+    print(f"Original features: {X_original.shape[1]}")
+    print(f"Engineered features: {X_engineered.shape[1]}")
+
+    X_train, X_test, y_train, y_test = split_data(
+        pd.concat([X_engineered, y], axis=1), TARGET_COLUMN
+    )
+
+    print(
+        f"\nStarting Optuna hyperparameter optimization with anti-clustering improvements..."
+    )
     print(
         f"Running 30 trials with 300 second timeout for faster iteration on M2..."
     )  # Reduced for speed
@@ -443,7 +811,7 @@ def train_and_evaluate(dataset_name, dataset_path):
     print(f"Best trial:")
     best_params_from_optuna = study.best_params
     best_n_estimators = study.best_trial.user_attrs.get(
-        "best_n_estimators", 1000
+        "best_n_estimators", 2000
     )  # Updated default
     best_objective = study.best_trial.user_attrs.get(
         "objective_used", "reg:squarederror"
@@ -458,7 +826,11 @@ def train_and_evaluate(dataset_name, dataset_path):
         print(f"    {key}: {value}")
     print(f"  Best n_estimators (from early stopping): {best_n_estimators}")
 
-    print(f"\nTraining final model with best parameters...")
+    # SOLUTION 8: Train both single model and ensemble for comparison
+    print(f"\n🎯 Training final models...")
+
+    # Train regular XGBoost model
+    print("1. Training regularized XGBoost model...")
     final_model_params = best_params_from_optuna.copy()
 
     # Remove objective from params since we'll set it explicitly
@@ -482,11 +854,11 @@ def train_and_evaluate(dataset_name, dataset_path):
         objective=best_objective,  # Use the best objective found
         random_state=RANDOM_SEED,
         n_estimators=best_n_estimators,
-        early_stopping_rounds=30,  # Reduced for speed
+        early_stopping_rounds=50,  # Increased for better convergence
         **final_model_params,
     )
 
-    print("Fitting final model on full training set...")
+    print("Fitting final XGBoost model on full training set...")
 
     # Handle different objectives for final training
     if best_objective == "reg:squaredlogerror":
@@ -516,50 +888,133 @@ def train_and_evaluate(dataset_name, dataset_path):
         verbose=True,  # Keep verbose for final model to see progress
     )
 
-    actual_n_estimators_final = getattr(final_model, "best_iteration", None)
-    if actual_n_estimators_final is not None and actual_n_estimators_final > 0:
-        print(
-            f"  Final model actual n_estimators after early stopping: {actual_n_estimators_final + 1}"
-        )
-    elif hasattr(final_model, "n_estimators_"):
-        print(
-            f"  Final model actual n_estimators (no early stop or stop at max): {final_model.n_estimators_}"
-        )
-    else:
-        print(
-            f"  Final model actual n_estimators: {best_n_estimators} (could not read from model after fit)"
-        )
-
-    print("Evaluating model on the test set...")
-    y_pred = final_model.predict(X_test)
-
-    mse = mean_squared_error(y_test, y_pred)
-    rmse = np.sqrt(mse)
-    mae = mean_absolute_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-
-    print(f"Test Set Metrics for {dataset_name}:")
-    print(f"  MSE: {mse:.4f}")
-    print(f"  RMSE: {rmse:.4f}")
-    print(f"  MAE: {mae:.4f}")
-    print(f"  R-squared: {r2:.4f}")
-
-    metrics = {"MSE": mse, "RMSE": rmse, "MAE": mae, "R2": r2}
-
-    feature_importances = pd.Series(
-        final_model.feature_importances_, index=X_train.columns
-    ).sort_values(ascending=False)
-
-    print("\nFeature Importances:")
-    print(feature_importances)
-
-    potential_omittable_features = feature_importances[
-        feature_importances < 0.001
-    ].index.tolist()
-    print(
-        f"\nPotentially omittable features (importance < 0.001) for {dataset_name}: {potential_omittable_features}"
+    # Train ensemble model
+    print("\n2. Training ensemble model to reduce clustering...")
+    ensemble_model = create_ensemble_model(
+        X_train, y_train_final, X_test, y_test_final, best_params_from_optuna
     )
 
+    # Evaluate both models
+    print("\n📊 Evaluating models...")
+
+    # XGBoost predictions
+    y_pred_xgb = final_model.predict(X_test)
+
+    # Ensemble predictions
+    y_pred_ensemble = ensemble_model.predict(X_test)
+
+    # Standard metrics on log-scaled data for XGBoost
+    mse_xgb = mean_squared_error(y_test, y_pred_xgb)
+    rmse_xgb = np.sqrt(mse_xgb)
+    mae_xgb = mean_absolute_error(y_test, y_pred_xgb)
+    r2_xgb = r2_score(y_test, y_pred_xgb)
+
+    # Standard metrics on log-scaled data for Ensemble
+    mse_ensemble = mean_squared_error(y_test, y_pred_ensemble)
+    rmse_ensemble = np.sqrt(mse_ensemble)
+    mae_ensemble = mean_absolute_error(y_test, y_pred_ensemble)
+    r2_ensemble = r2_score(y_test, y_pred_ensemble)
+
+    print(f"XGBoost Model Metrics for {dataset_name} (Log-Scaled):")
+    print(f"  MSE: {mse_xgb:.4f}")
+    print(f"  RMSE: {rmse_xgb:.4f}")
+    print(f"  MAE: {mae_xgb:.4f}")
+    print(f"  R-squared: {r2_xgb:.4f}")
+
+    print(f"\nEnsemble Model Metrics for {dataset_name} (Log-Scaled):")
+    print(f"  MSE: {mse_ensemble:.4f}")
+    print(f"  RMSE: {rmse_ensemble:.4f}")
+    print(f"  MAE: {mae_ensemble:.4f}")
+    print(f"  R-squared: {r2_ensemble:.4f}")
+
+    # Choose best model based on RMSE
+    if rmse_ensemble < rmse_xgb:
+        print(
+            f"\n🏆 Ensemble model performs better! Using ensemble for final analysis."
+        )
+        best_model = ensemble_model
+        y_pred = y_pred_ensemble
+        mse, rmse, mae, r2 = mse_ensemble, rmse_ensemble, mae_ensemble, r2_ensemble
+        model_type = "Ensemble"
+    else:
+        print(f"\n🏆 XGBoost model performs better! Using XGBoost for final analysis.")
+        best_model = final_model
+        y_pred = y_pred_xgb
+        mse, rmse, mae, r2 = mse_xgb, rmse_xgb, mae_xgb, r2_xgb
+        model_type = "XGBoost"
+
+    # Convert back to true dollar values for business metrics
+    print(f"\n🔄 Converting predictions back to true dollar values...")
+    y_test_dollars = inverse_transform_revenue(y_test)
+    y_pred_dollars = inverse_transform_revenue(y_pred)
+
+    # Calculate business metrics
+    business_metrics = calculate_business_metrics(y_test_dollars, y_pred_dollars)
+
+    print(
+        f"\n💰 Business Metrics for {dataset_name} ({model_type} Model - True Dollar Values):"
+    )
+    print(f"  MAE: ${business_metrics['mae_dollars']:.2f}")
+    print(f"  RMSE: ${business_metrics['rmse_dollars']:.2f}")
+    print(f"  Median AE: ${business_metrics['median_ae_dollars']:.2f}")
+    print(f"  MAPE: {business_metrics['mape']:.1f}%")
+    print(f"  SMAPE: {business_metrics['smape']:.1f}%")
+
+    print(f"\n📊 Revenue Distribution:")
+    for bucket, count in business_metrics["revenue_buckets"].items():
+        pct = (count / len(y_test_dollars)) * 100
+        print(f"  {bucket}: {count} users ({pct:.1f}%)")
+
+    print(f"\n🎯 Prediction Accuracy by Revenue Bucket:")
+    for bucket, metrics in business_metrics["bucket_accuracy"].items():
+        print(f"  {bucket}:")
+        print(f"    Count: {metrics['count']}")
+        print(f"    Avg Actual: ${metrics['mean_true']:.2f}")
+        print(f"    Avg Predicted: ${metrics['mean_pred']:.2f}")
+        print(f"    MAE: ${metrics['mae_dollars']:.2f}")
+
+    # Create business-focused plots
+    print(f"\n📈 Creating business analysis plots...")
+    create_business_plots(
+        y_test_dollars, y_pred_dollars, f"{dataset_name}_{model_type.lower()}"
+    )
+
+    # Create clustering analysis plot
+    print(f"\n🔍 Creating clustering analysis plot...")
+    create_clustering_analysis_plot(y_test, y_pred_xgb, y_pred_ensemble, dataset_name)
+
+    metrics = {"MSE": mse, "RMSE": rmse, "MAE": mae, "R2": r2, "Model_Type": model_type}
+
+    # Add business metrics to the metrics dictionary
+    metrics.update(
+        {
+            "MAE_Dollars": business_metrics["mae_dollars"],
+            "RMSE_Dollars": business_metrics["rmse_dollars"],
+            "Median_AE_Dollars": business_metrics["median_ae_dollars"],
+            "MAPE": business_metrics["mape"],
+            "SMAPE": business_metrics["smape"],
+        }
+    )
+
+    # Feature importance (only for XGBoost)
+    if hasattr(final_model, "feature_importances_"):
+        feature_importances = pd.Series(
+            final_model.feature_importances_, index=X_train.columns
+        ).sort_values(ascending=False)
+
+        print("\nXGBoost Feature Importances:")
+        print(feature_importances.head(10))
+
+        potential_omittable_features = feature_importances[
+            feature_importances < 0.001
+        ].index.tolist()
+        print(
+            f"\nPotentially omittable features (importance < 0.001) for {dataset_name}: {potential_omittable_features}"
+        )
+    else:
+        feature_importances = pd.Series()
+
+    # Original plots (log-scaled)
     fig_metrics = go.Figure(
         data=[
             go.Bar(
@@ -567,29 +1022,35 @@ def train_and_evaluate(dataset_name, dataset_path):
             )
         ]
     )
-    fig_metrics.update_layout(title_text=f"Model Performance Metrics - {dataset_name}")
-    fig_metrics.write_html(f"metrics_{dataset_name.replace(' ', '_')}.html")
-
-    fig_feature_importance = px.bar(
-        feature_importances,
-        x=feature_importances.values,
-        y=feature_importances.index,
-        orientation="h",
-        labels={"x": "Importance", "y": "Feature"},
-        title=f"Feature Importance - {dataset_name}",
+    fig_metrics.update_layout(
+        title_text=f"Model Performance Metrics - {dataset_name} ({model_type})"
     )
-    fig_feature_importance.update_layout(yaxis={"categoryorder": "total ascending"})
-    fig_feature_importance.write_html(
-        f"feature_importance_{dataset_name.replace(' ', '_')}.html"
+    fig_metrics.write_html(
+        f"metrics_{dataset_name.replace(' ', '_')}_{model_type.lower()}.html"
     )
 
+    if not feature_importances.empty:
+        fig_feature_importance = px.bar(
+            feature_importances.head(20),  # Show top 20 features
+            x=feature_importances.head(20).values,
+            y=feature_importances.head(20).index,
+            orientation="h",
+            labels={"x": "Importance", "y": "Feature"},
+            title=f"Feature Importance - {dataset_name} (XGBoost)",
+        )
+        fig_feature_importance.update_layout(yaxis={"categoryorder": "total ascending"})
+        fig_feature_importance.write_html(
+            f"feature_importance_{dataset_name.replace(' ', '_')}.html"
+        )
+
+    # Original scatter plot (log-scaled)
     fig_scatter = go.Figure()
     fig_scatter.add_trace(
         go.Scatter(
             x=y_test,
             y=y_pred,
             mode="markers",
-            name="Actual vs. Predicted",
+            name=f"Actual vs. Predicted ({model_type})",
             marker=dict(color="blue", opacity=0.5),
         )
     )
@@ -603,13 +1064,97 @@ def train_and_evaluate(dataset_name, dataset_path):
         )
     )
     fig_scatter.update_layout(
-        title=f"Actual vs. Predicted Revenue - {dataset_name}",
-        xaxis_title="Actual Revenue (USD 30d)",
-        yaxis_title="Predicted Revenue (USD 30d)",
+        title=f"Actual vs. Predicted Revenue (Log-Scaled) - {dataset_name} ({model_type})",
+        xaxis_title="Actual Revenue (Log-Scaled)",
+        yaxis_title="Predicted Revenue (Log-Scaled)",
     )
-    fig_scatter.write_html(f"actual_vs_predicted_{dataset_name.replace(' ', '_')}.html")
+    fig_scatter.write_html(
+        f"actual_vs_predicted_{dataset_name.replace(' ', '_')}_{model_type.lower()}.html"
+    )
 
-    return final_model, metrics, feature_importances
+    return best_model, metrics, feature_importances
+
+
+def create_clustering_analysis_plot(y_test, y_pred_xgb, y_pred_ensemble, dataset_name):
+    """Create a plot comparing XGBoost vs Ensemble predictions to show clustering reduction."""
+
+    fig = make_subplots(
+        rows=1,
+        cols=2,
+        subplot_titles=(
+            "XGBoost Predictions (May Show Clustering)",
+            "Ensemble Predictions (Smoother)",
+        ),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}]],
+    )
+
+    # XGBoost scatter plot
+    fig.add_trace(
+        go.Scatter(
+            x=y_test,
+            y=y_pred_xgb,
+            mode="markers",
+            name="XGBoost",
+            marker=dict(color="red", opacity=0.6, size=3),
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Ensemble scatter plot
+    fig.add_trace(
+        go.Scatter(
+            x=y_test,
+            y=y_pred_ensemble,
+            mode="markers",
+            name="Ensemble",
+            marker=dict(color="blue", opacity=0.6, size=3),
+        ),
+        row=1,
+        col=2,
+    )
+
+    # Add ideal fit lines
+    min_val, max_val = y_test.min(), y_test.max()
+
+    fig.add_trace(
+        go.Scatter(
+            x=[min_val, max_val],
+            y=[min_val, max_val],
+            mode="lines",
+            name="Perfect Prediction",
+            line=dict(color="black", dash="dash"),
+            showlegend=False,
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=[min_val, max_val],
+            y=[min_val, max_val],
+            mode="lines",
+            name="Perfect Prediction",
+            line=dict(color="black", dash="dash"),
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+
+    fig.update_layout(
+        title=f"Clustering Analysis: XGBoost vs Ensemble - {dataset_name}",
+        height=500,
+        showlegend=True,
+    )
+
+    fig.update_xaxes(title_text="Actual Revenue (Log-Scaled)", row=1, col=1)
+    fig.update_xaxes(title_text="Actual Revenue (Log-Scaled)", row=1, col=2)
+    fig.update_yaxes(title_text="Predicted Revenue (Log-Scaled)", row=1, col=1)
+    fig.update_yaxes(title_text="Predicted Revenue (Log-Scaled)", row=1, col=2)
+
+    fig.write_html(f"clustering_analysis_{dataset_name.replace(' ', '_')}.html")
 
 
 if __name__ == "__main__":
