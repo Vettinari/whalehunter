@@ -15,26 +15,27 @@ import multiprocessing
 # Lock all random seeds for reproducibility
 RANDOM_SEED = 42
 
-# M2 Mac optimizations
+# Hardware Optimizations
 N_CORES = multiprocessing.cpu_count()  # Use all available cores
-print(f"Detected {N_CORES} CPU cores on M2 Mac")
+print(f"Detected {N_CORES} CPU cores") # Simpler message
 
 
-# Check for GPU availability (Metal Performance Shaders on M2)
+# Check for GPU availability (e.g., CUDA for NVIDIA, Metal for Apple Silicon)
 def check_gpu_support():
-    """Check if GPU training is available on M2 Mac."""
+    """Check if GPU training is available (tries CUDA first, then generic error)."""
     try:
         # Try to create a simple XGBoost model with GPU
-        test_model = xgb.XGBRegressor(tree_method="gpu_hist", gpu_id=0, n_estimators=1)
-        # Create dummy data to test
+        # For XGBoost >= 2.0, use device="cuda:0" or device="mps"
+        # Assuming CUDA is the primary target for now based on logs
+        test_model = xgb.XGBRegressor(tree_method="hist", device="cuda:0", n_estimators=1)
         X_test = np.random.random((10, 5))
         y_test = np.random.random(10)
         test_model.fit(X_test, y_test)
-        print("✅ GPU support (Metal) detected and working!")
+        print("✅ GPU support (CUDA or similar) detected and working!")
         return True
     except Exception as e:
-        print(f"❌ GPU support not available: {e}")
-        print("Using optimized CPU training instead")
+        print(f"❌ GPU support not available or error during test: {e}")
+        print("Using optimized CPU training instead.")
         return False
 
 
@@ -257,19 +258,20 @@ def objective(trial, X_train, y_train, X_val, y_val):
         "random_state": RANDOM_SEED,
         "n_jobs": N_CORES,  # Use all available cores
         "early_stopping_rounds": 50,  # Increased for better convergence
-        # M2 Mac optimizations
-        "tree_method": "gpu_hist" if GPU_AVAILABLE else "hist",  # Use GPU if available
-        "max_bin": 256,  # Optimized for M2 memory bandwidth
+        # Hardware optimizations (GPU or CPU)
+        "tree_method": "hist", # Standard 'hist' for both CPU and GPU with XGBoost >= 2.0
+        "max_bin": 256,  # Optimized for memory bandwidth
         # SOLUTION 5: Interaction constraints to prevent over-reliance on single features
         "interaction_constraints": "[[0,1,2,3,4],[5,6,7,8,9],[10,11,12,13,14]]",  # Force feature interactions
     }
 
     # GPU-specific optimizations
     if GPU_AVAILABLE:
-        params["gpu_id"] = 0
-        params["predictor"] = "gpu_predictor"
+        params["device"] = "cuda:0" # Use device="cuda:0" for XGBoost >= 2.0
+        # params["predictor"] = "gpu_predictor" # This is often default or not needed with device setting
     else:
-        # CPU optimizations for M2
+        # CPU optimizations
+        params["device"] = "cpu" # Explicitly set to CPU if GPU not available
         params["max_bin"] = 512  # Higher bins for CPU as we have more memory bandwidth
 
     # Add Tweedie-specific parameter if using Tweedie
@@ -841,14 +843,17 @@ def train_and_evaluate(dataset_name, dataset_path):
     final_model_params.update(
         {
             "n_jobs": N_CORES,
-            "tree_method": "gpu_hist" if GPU_AVAILABLE else "hist",
-            "max_bin": 256 if GPU_AVAILABLE else 512,
+            "tree_method": "hist", # Standard 'hist' for both CPU and GPU with XGBoost >= 2.0
+            "max_bin": 256,  # Optimized for memory bandwidth (can be higher for CPU)
         }
     )
 
     if GPU_AVAILABLE:
-        final_model_params["gpu_id"] = 0
-        final_model_params["predictor"] = "gpu_predictor"
+        final_model_params["device"] = "cuda:0" # Use device="cuda:0" for XGBoost >= 2.0
+    else:
+        # CPU optimizations
+        final_model_params["device"] = "cpu" # Explicitly set to CPU if GPU not available
+        final_model_params["max_bin"] = 512  # Higher bins for CPU as we have more memory bandwidth
 
     final_model = xgb.XGBRegressor(
         objective=best_objective,  # Use the best objective found

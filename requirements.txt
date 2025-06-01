@@ -52,3 +52,6 @@ openpyxl>=3.1.0  # For Excel files if needed
 xlsxwriter>=3.1.0  # For Excel output
 
 category_encoders==2.8.1
+
+wandb
+pytorch-lightning
