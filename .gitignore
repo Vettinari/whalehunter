@@ -1,3 +1,7 @@
-raw_data.parquet
+# Parquet files (anywhere in project)
+**/*.parquet
+*.parquet
+
+# Virtual environment
 venv/**/*
 venv
