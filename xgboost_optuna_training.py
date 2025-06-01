@@ -10,9 +10,35 @@ from plotly.subplots import make_subplots
 import joblib  # For saving scaler if needed, though not explicitly used for model saving here
 import random
 import os
+import multiprocessing
 
 # Lock all random seeds for reproducibility
 RANDOM_SEED = 42
+
+# M2 Mac optimizations
+N_CORES = multiprocessing.cpu_count()  # Use all available cores
+print(f"Detected {N_CORES} CPU cores on M2 Mac")
+
+
+# Check for GPU availability (Metal Performance Shaders on M2)
+def check_gpu_support():
+    """Check if GPU training is available on M2 Mac."""
+    try:
+        # Try to create a simple XGBoost model with GPU
+        test_model = xgb.XGBRegressor(tree_method="gpu_hist", gpu_id=0, n_estimators=1)
+        # Create dummy data to test
+        X_test = np.random.random((10, 5))
+        y_test = np.random.random(10)
+        test_model.fit(X_test, y_test)
+        print("✅ GPU support (Metal) detected and working!")
+        return True
+    except Exception as e:
+        print(f"❌ GPU support not available: {e}")
+        print("Using optimized CPU training instead")
+        return False
+
+
+GPU_AVAILABLE = check_gpu_support()
 
 
 def set_random_seeds(seed=RANDOM_SEED):
@@ -156,7 +182,7 @@ def optuna_callback(study, trial):
 
 
 def objective(trial, X_train, y_train, X_val, y_val):
-    """Optuna objective function for XGBoost regressor."""
+    """Optuna objective function for XGBoost regressor optimized for M2 Mac."""
     print(f"\nStarting trial {trial.number}...")
 
     # Check if data has zero values to determine valid objectives
@@ -181,29 +207,44 @@ def objective(trial, X_train, y_train, X_val, y_val):
 
     objective_func = trial.suggest_categorical("objective", objective_choices)
 
+    # M2 Mac optimized parameters
     params = {
         "objective": objective_func,
-        "booster": trial.suggest_categorical("booster", ["gbtree", "dart"]),
+        "booster": trial.suggest_categorical(
+            "booster", ["gbtree"]
+        ),  # Focus on gbtree for speed
         "lambda": trial.suggest_float(
             "lambda", 1e-8, 10.0, log=True
         ),  # Increased range
         "alpha": trial.suggest_float("alpha", 1e-8, 10.0, log=True),  # Increased range
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),  # Narrowed range
+        "subsample": trial.suggest_float(
+            "subsample", 0.7, 1.0
+        ),  # Narrowed range for speed
         "colsample_bytree": trial.suggest_float(
-            "colsample_bytree", 0.6, 1.0
-        ),  # Narrowed range
-        "max_depth": trial.suggest_int("max_depth", 3, 12),  # Increased range
+            "colsample_bytree", 0.7, 1.0
+        ),  # Narrowed range for speed
+        "max_depth": trial.suggest_int("max_depth", 4, 10),  # Reduced range for speed
         "min_child_weight": trial.suggest_int(
-            "min_child_weight", 1, 20
-        ),  # Increased range
+            "min_child_weight", 1, 15
+        ),  # Reduced range
         "eta": trial.suggest_float(
-            "eta", 0.01, 0.3, log=True
-        ),  # Better range for learning rate
+            "eta", 0.05, 0.3, log=True
+        ),  # Slightly higher minimum for faster convergence
         "random_state": RANDOM_SEED,
-        "n_jobs": -1,
-        "early_stopping_rounds": 50,
-        "tree_method": "hist",  # Faster and often better for large datasets
+        "n_jobs": N_CORES,  # Use all available cores
+        "early_stopping_rounds": 30,  # Reduced for faster trials
+        # M2 Mac optimizations
+        "tree_method": "gpu_hist" if GPU_AVAILABLE else "hist",  # Use GPU if available
+        "max_bin": 256,  # Optimized for M2 memory bandwidth
     }
+
+    # GPU-specific optimizations
+    if GPU_AVAILABLE:
+        params["gpu_id"] = 0
+        params["predictor"] = "gpu_predictor"
+    else:
+        # CPU optimizations for M2
+        params["max_bin"] = 512  # Higher bins for CPU as we have more memory bandwidth
 
     # Add Tweedie-specific parameter if using Tweedie
     if objective_func == "reg:tweedie":
@@ -228,18 +269,8 @@ def objective(trial, X_train, y_train, X_val, y_val):
     # Add eval_metric to params
     params["eval_metric"] = eval_metric
 
-    if params["booster"] == "dart":
-        params["sample_type"] = trial.suggest_categorical(
-            "sample_type", ["uniform", "weighted"]
-        )
-        params["normalize_type"] = trial.suggest_categorical(
-            "normalize_type", ["tree", "forest"]
-        )
-        params["rate_drop"] = trial.suggest_float("rate_drop", 1e-8, 1.0, log=True)
-        params["skip_drop"] = trial.suggest_float("skip_drop", 1e-8, 1.0, log=True)
-
-    # Increase n_estimators for better convergence with early stopping
-    model = xgb.XGBRegressor(n_estimators=2000, **params)
+    # Reduced n_estimators for faster trials, early stopping will handle convergence
+    model = xgb.XGBRegressor(n_estimators=1000, **params)  # Reduced from 2000
 
     # Handle potential issues for different objectives
     if objective_func == "reg:squaredlogerror":
@@ -269,7 +300,7 @@ def objective(trial, X_train, y_train, X_val, y_val):
         X_train,
         y_train_adj,
         eval_set=[(X_val, y_val_adj)],
-        verbose=True,  # Enable verbose output to see training progress
+        verbose=False,  # Reduced verbosity for speed
     )
 
     preds = model.predict(X_val)
@@ -294,7 +325,7 @@ def objective(trial, X_train, y_train, X_val, y_val):
         if hasattr(model, "n_estimators_"):  # This is set after fit
             trial.set_user_attr("best_n_estimators", model.n_estimators_)
         else:  # Fallback if somehow n_estimators_ is not available
-            trial.set_user_attr("best_n_estimators", 2000)  # The initial n_estimators
+            trial.set_user_attr("best_n_estimators", 1000)  # The initial n_estimators
 
     print(
         f"Trial {trial.number} - RMSE: {rmse:.6f}, MAE: {mae:.6f}, Objective: {objective_func}"
@@ -375,9 +406,13 @@ def train_and_evaluate(dataset_name, dataset_path):
     X_train, X_test, y_train, y_test = split_data(df, TARGET_COLUMN)
 
     print(f"\nStarting Optuna hyperparameter optimization...")
-    print(f"Running 50 trials with 600 second timeout...")
+    print(
+        f"Running 30 trials with 300 second timeout for faster iteration on M2..."
+    )  # Reduced for speed
     # Create study with seeded sampler for reproducibility
-    sampler = optuna.samplers.TPESampler(seed=RANDOM_SEED)
+    sampler = optuna.samplers.TPESampler(
+        seed=RANDOM_SEED, n_startup_trials=5
+    )  # Reduced startup trials
     study = optuna.create_study(
         direction="minimize",
         study_name=f"xgb_optimization_{dataset_name}",
@@ -397,8 +432,8 @@ def train_and_evaluate(dataset_name, dataset_path):
 
     study.optimize(
         lambda trial: objective(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt),
-        n_trials=50,
-        timeout=600,
+        n_trials=30,  # Reduced from 50 for faster iteration
+        timeout=300,  # Reduced from 600 for faster iteration
         callbacks=[optuna_callback],
     )
 
@@ -407,7 +442,9 @@ def train_and_evaluate(dataset_name, dataset_path):
     print(f"{'='*50}")
     print(f"Best trial:")
     best_params_from_optuna = study.best_params
-    best_n_estimators = study.best_trial.user_attrs.get("best_n_estimators", 2000)
+    best_n_estimators = study.best_trial.user_attrs.get(
+        "best_n_estimators", 1000
+    )  # Updated default
     best_objective = study.best_trial.user_attrs.get(
         "objective_used", "reg:squarederror"
     )
@@ -428,13 +465,24 @@ def train_and_evaluate(dataset_name, dataset_path):
     if "objective" in final_model_params:
         del final_model_params["objective"]
 
+    # M2 Mac optimized final model
+    final_model_params.update(
+        {
+            "n_jobs": N_CORES,
+            "tree_method": "gpu_hist" if GPU_AVAILABLE else "hist",
+            "max_bin": 256 if GPU_AVAILABLE else 512,
+        }
+    )
+
+    if GPU_AVAILABLE:
+        final_model_params["gpu_id"] = 0
+        final_model_params["predictor"] = "gpu_predictor"
+
     final_model = xgb.XGBRegressor(
         objective=best_objective,  # Use the best objective found
         random_state=RANDOM_SEED,
-        n_jobs=-1,
         n_estimators=best_n_estimators,
-        early_stopping_rounds=50,
-        tree_method="hist",
+        early_stopping_rounds=30,  # Reduced for speed
         **final_model_params,
     )
 
@@ -465,7 +513,7 @@ def train_and_evaluate(dataset_name, dataset_path):
         X_train,
         y_train_final,
         eval_set=[(X_test, y_test_final)],
-        verbose=True,  # Enable verbose output to see training progress
+        verbose=True,  # Keep verbose for final model to see progress
     )
 
     actual_n_estimators_final = getattr(final_model, "best_iteration", None)
