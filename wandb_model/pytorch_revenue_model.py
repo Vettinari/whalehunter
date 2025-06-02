@@ -32,32 +32,24 @@ set_random_seeds()
 DEFAULT_CONFIG = {
     "learning_rate": 1e-3,
     "batch_size": 64,
-    "max_epochs": 50, # Changed from 'epochs' to 'max_epochs' for Trainer
+    "max_epochs": 10, # Changed from 'epochs' to 'max_epochs' for Trainer
     "hidden_layer_sizes": [128, 64],
     "dropout_rate": 0.2,
     "optimizer_name": "Adam",
     "activation_function": "ReLU",
     "dataset_path": "data/scaled_revenue_30d_balanced.parquet", # Updated default dataset
     "target_column": "user_revenue_usd_30d",
-    "num_workers": 2, # For DataLoader
     "early_stopping_patience": 10,
-    "lr_scheduler_patience": 5
+    "lr_scheduler_patience": 5,
+    "profiler": None # Can be set to "simple", "advanced", "pytorch" by sweep
 }
 
 class RevenueDataset(Dataset):
     """PyTorch Dataset for revenue prediction."""
-    def __init__(self, features, labels):
-        # Ensure features are purely numeric (np.float32) before converting to tensor
-        try:
-            feature_values = features.values.astype(np.float32)
-        except Exception as e:
-            print("Error converting features to np.float32. Dumping problematic columns:")
-            for col in features.columns:
-                if features[col].dtype == 'object':
-                    print(f"Column '{col}' has dtype object.")
-            raise e
-        self.features = torch.tensor(feature_values, dtype=torch.float32)
-        self.labels = torch.tensor(labels.values.astype(np.float32), dtype=torch.float32).unsqueeze(1)
+    def __init__(self, features_np: np.ndarray, labels_np: np.ndarray):
+        # Expects pre-converted NumPy arrays
+        self.features = torch.from_numpy(features_np) 
+        self.labels = torch.from_numpy(labels_np).unsqueeze(1)
 
     def __len__(self):
         return len(self.features)
@@ -97,13 +89,14 @@ class MLP(nn.Module):
 class RevenueDataModule(pl.LightningDataModule):
     def __init__(self, dataset_path: str, target_column: str, batch_size: int, num_workers: int, random_seed: int = RANDOM_SEED):
         super().__init__()
-        self.dataset_path = dataset_path
-        self.target_column = target_column
-        self.batch_size = batch_size
         self.num_workers = num_workers
+        self.save_hyperparameters() # Saves batch_size, num_workers etc.
+        self.dataset_path = dataset_path # Not saved by default by save_hyperparameters if not in __init__ signature directly
+        self.target_column = target_column
         self.random_seed = random_seed
-        self.X_train, self.X_val, self.X_test = None, None, None
-        self.y_train, self.y_val, self.y_test = None, None, None
+        # Data will be loaded and converted in setup
+        self.X_train_np, self.X_val_np, self.X_test_np = None, None, None
+        self.y_train_np, self.y_val_np, self.y_test_np = None, None, None
         self.input_size = None
 
     def prepare_data(self):
@@ -114,15 +107,15 @@ class RevenueDataModule(pl.LightningDataModule):
     def setup(self, stage: str = None):
         # Assign train/val datasets for use in dataloaders
         # This is called on every GPU in DDP
-        print(f"Loading data from {self.dataset_path} for stage: {stage}")
-        df = pd.read_parquet(self.dataset_path)
+        print(f"DataModule setup for stage: {stage}. Loading data from {self.hparams.dataset_path}")
+        df = pd.read_parquet(self.hparams.dataset_path)
         print(f"Loaded {len(df)} rows.")
 
-        if self.target_column not in df.columns:
-            raise ValueError(f"Target column '{self.target_column}' not found. Available: {df.columns.tolist()}")
+        if self.hparams.target_column not in df.columns:
+            raise ValueError(f"Target column '{self.hparams.target_column}' not found. Available: {df.columns.tolist()}")
 
-        X = df.drop(columns=[self.target_column])
-        y = df[self.target_column]
+        X = df.drop(columns=[self.hparams.target_column])
+        y = df[self.hparams.target_column]
 
         # Ensure all feature columns are numeric
         original_X_cols = X.columns.tolist()
@@ -138,7 +131,7 @@ class RevenueDataModule(pl.LightningDataModule):
                     X[col] = X[col].fillna(0) 
                 X_numeric_cols.append(col)
             except Exception as e:
-                print(f"Warning: Could not convert column '{col}' to numeric: {e}. It will be dropped.")
+                print(f"Warning: Could not convert column '{col}' to numeric: {e}. Dropped.")
 
         X = X[X_numeric_cols]
         if X.empty:
@@ -148,26 +141,34 @@ class RevenueDataModule(pl.LightningDataModule):
         self.input_size = X.shape[1]
 
         # Split: 70% train, 15% validation, 15% test
-        X_train_val, self.X_test, y_train_val, self.y_test = train_test_split(
-            X, y, test_size=0.15, random_state=self.random_seed
+        X_train_val, X_test_df, y_train_val, y_test_series = train_test_split(
+            X, y, test_size=0.15, random_state=self.hparams.random_seed
         )
-        self.X_train, self.X_val, self.y_train, self.y_val = train_test_split(
-            X_train_val, y_train_val, test_size=(0.15/0.85), random_state=self.random_seed # 0.15 of original is (0.15/0.85) of X_train_val
+        X_train_df, X_val_df, y_train_series, y_val_series = train_test_split(
+            X_train_val, y_train_val, test_size=(0.15/0.85), random_state=self.hparams.random_seed # 0.15 of original is (0.15/0.85) of X_train_val
         )
         
-        print(f"Train size: {len(self.X_train)}, Val size: {len(self.X_val)}, Test size: {len(self.X_test)}")
+        # Convert to NumPy arrays once here
+        self.X_train_np = X_train_df.values.astype(np.float32)
+        self.X_val_np = X_val_df.values.astype(np.float32)
+        self.X_test_np = X_test_df.values.astype(np.float32)
+        self.y_train_np = y_train_series.values.astype(np.float32)
+        self.y_val_np = y_val_series.values.astype(np.float32)
+        self.y_test_np = y_test_series.values.astype(np.float32)
+
+        print(f"Train size: {len(self.X_train_np)}, Val size: {len(self.X_val_np)}, Test size: {len(self.X_test_np)}")
 
     def train_dataloader(self):
-        train_dataset = RevenueDataset(self.X_train, self.y_train)
-        return DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=torch.cuda.is_available(), persistent_workers=self.num_workers > 0)
+        train_dataset = RevenueDataset(self.X_train_np, self.y_train_np)
+        return DataLoader(train_dataset, batch_size=self.hparams.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=torch.cuda.is_available(), persistent_workers=self.num_workers > 0)
 
     def val_dataloader(self):
-        val_dataset = RevenueDataset(self.X_val, self.y_val)
-        return DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=torch.cuda.is_available(), persistent_workers=self.num_workers > 0)
+        val_dataset = RevenueDataset(self.X_val_np, self.y_val_np)
+        return DataLoader(val_dataset, batch_size=self.hparams.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=torch.cuda.is_available(), persistent_workers=self.num_workers > 0)
 
     def test_dataloader(self):
-        test_dataset = RevenueDataset(self.X_test, self.y_test)
-        return DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=torch.cuda.is_available(), persistent_workers=self.num_workers > 0)
+        test_dataset = RevenueDataset(self.X_test_np, self.y_test_np)
+        return DataLoader(test_dataset, batch_size=self.hparams.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=torch.cuda.is_available(), persistent_workers=self.num_workers > 0)
 
 class LitRevenueModel(pl.LightningModule):
     def __init__(self, input_size: int, hidden_layer_sizes: list, dropout_rate: float, 
@@ -255,7 +256,7 @@ def train_model_lightning():
         dataset_path=config.dataset_path,
         target_column=config.target_column,
         batch_size=config.batch_size,
-        num_workers=getattr(config, 'num_workers', DEFAULT_CONFIG['num_workers']) # Get from config or default
+        num_workers=4 # Get from config or default
     )
     data_module.setup() # Call setup to determine input_size
 
@@ -279,20 +280,23 @@ def train_model_lightning():
         mode='min',
     )
     
+    early_stop_patience_val = config.get('early_stopping_patience', DEFAULT_CONFIG['early_stopping_patience'])
     early_stop_callback = EarlyStopping(
         monitor='val_rmse',
-        patience=getattr(config, 'early_stopping_patience', DEFAULT_CONFIG['early_stopping_patience']), # Get from config or default
+        patience=early_stop_patience_val,
         verbose=True, # Lightning's EarlyStopping verbose is fine
         mode='min'
     )
 
+    trainer_profiler = config.get("profiler", DEFAULT_CONFIG["profiler"])
     trainer = pl.Trainer(
         logger=wandb_logger,
         callbacks=[checkpoint_callback, early_stop_callback],
         max_epochs=config.max_epochs,
         accelerator="auto", # Automatically detects GPU/CPU/TPU
         devices="auto",
-        deterministic=True # For reproducibility, might impact performance slightly
+        deterministic=True, # For reproducibility, might impact performance slightly
+        profiler=trainer_profiler
     )
 
     print("Starting trainer.fit()...")
@@ -302,14 +306,15 @@ def train_model_lightning():
     # trainer.test(model, datamodule=data_module, ckpt_path='best') # Loads the best checkpoint automatically
     # Or load manually if needed and then test
     best_model_path = checkpoint_callback.best_model_path
-    if best_model_path:
+    if best_model_path and os.path.exists(best_model_path):
         print(f"Loading best model from: {best_model_path}")
         trainer.test(model=model, datamodule=data_module, ckpt_path=best_model_path)
     else:
-        print("No best model checkpoint found. Testing with last model state.")
+        print(f"No best model checkpoint found at '{best_model_path if best_model_path else 'None'}' or path does not exist. Testing with last model state.")
         trainer.test(model=model, datamodule=data_module)
         
-    wandb.finish() # Ensure W&B run is finished properly, especially if not using agent's auto-finish
+    if wandb.run: # Ensure wandb run is active before finishing
+        wandb.finish()
 
 if __name__ == "__main__":
     # This script is intended to be called by the wandb agent,

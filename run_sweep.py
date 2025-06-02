@@ -15,28 +15,28 @@ SWEEP_CONFIG = {
     'parameters': {
         'learning_rate': {
             'distribution': 'log_uniform_values',
-            'min': 1e-5,
-            'max': 1e-2
+            'min': 1e-6,
+            'max': 1e-3
         },
         'batch_size': {
-            'values': [32, 64, 128, 256]
+            'values': [128, 256, 512, 1024]
         },
         'max_epochs': { # Changed from 'epochs'
             'value': DEFAULT_CONFIG['max_epochs'] 
         },
         'hidden_layer_sizes': {
-            'values': [[64, 32], [128, 64], [256, 128, 64], [128, 128], [512, 256, 128]]
+            'values': [[128, 64], [256, 128, 64], [128, 128], [512, 256, 128]]
         },
         'dropout_rate': {
             'distribution': 'uniform',
             'min': 0.1,
-            'max': 0.5
+            'max': 0.4
         },
         'optimizer_name': {
-            'values': ['Adam', 'AdamW', 'SGD']
+            'values': ['Adam']
         },
         'activation_function': {
-            'values': ['ReLU', 'LeakyReLU', 'Tanh']
+            'values': ['ReLU']
         },
         'dataset_path': {
             'value': DEFAULT_CONFIG['dataset_path']
@@ -44,14 +44,11 @@ SWEEP_CONFIG = {
         'target_column': {
             'value': DEFAULT_CONFIG['target_column']
         },
-        'num_workers': {
-            'values': [0, 2, 4] # Example values for num_workers
-        },
         'early_stopping_patience': {
-            'values': [5, 10, 15] # Example values
+            'values': [5] # Example values
         },
         'lr_scheduler_patience': {
-            'values': [3, 5, 7] # Example values
+            'values': [3, 5] # Example values
         }
     },
     'early_terminate': {
